@@ -1,7 +1,8 @@
 import torch
 import time
-import numpy as np
 import torchfields
+
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from metroem import helpers
 from metroem.loss import unsupervised_loss
@@ -52,6 +53,20 @@ def optimize_pre_post_ups(src, tgt, initial_res, sm, lr, num_iter,
     elif opt_mode == 'sgd':
         optimizer = torch.optim.SGD(trainable, lr=lr, **opt_params)
 
+    min_lr = lr * (0.5**max_bad)
+
+    scheduler = ReduceLROnPlateau(
+        optimizer=optimizer,
+        mode='min',
+        factor=0.5,
+        patience=noimpr_period,
+        verbose=True,
+        threshold_mode='rel',
+        threshold=1e-5,
+        cooldown=25,
+        min_lr=min_lr,
+    )
+
     if normalize:
         with torch.no_grad():
             src_mask = torch.logical_not(src_zeros)
@@ -73,7 +88,6 @@ def optimize_pre_post_ups(src, tgt, initial_res, sm, lr, num_iter,
         'tgt_zeros': tgt_zeros,
     }
 
-    prev_loss = []
     s = time.time()
 
     loss_bundle['pred_res'] = pred_res
@@ -81,11 +95,6 @@ def optimize_pre_post_ups(src, tgt, initial_res, sm, lr, num_iter,
         loss_bundle['pred_res'] = loss_bundle['pred_res'].up(opt_res_coarsness)
     loss_bundle['pred_tgt'] = loss_bundle['pred_res'].from_pixels()(src)
     loss_dict = opti_loss(loss_bundle, crop=crop)
-    best_loss = loss_dict['result'].detach().cpu().numpy()
-    new_best_ago = 0
-    lr_halfed_count = 0
-    no_impr_count = 0
-    new_best_count = 0
     if verbose:
         print (loss_dict['result'].detach().cpu().numpy(), loss_dict['similarity'].detach().cpu().numpy(), loss_dict['smoothness'].detach().cpu().numpy())
 
@@ -98,37 +107,15 @@ def optimize_pre_post_ups(src, tgt, initial_res, sm, lr, num_iter,
         loss_var = loss_dict['result']
         if l2 > 0.0:
             loss_var += (loss_bundle['pred_res']**2).mean() * l2
-        curr_loss = loss_var.detach().cpu().numpy()
-
-        min_improve = 1e-11
-        if curr_loss + min_improve <= best_loss:
-            # Improvement
-            best_loss = curr_loss
-            new_best_count += 1
-            new_best_ago = 0
-        else:
-            new_best_ago += 1
-            if new_best_ago > noimpr_period:
-                # No improvement, reduce learning rate
-                no_impr_count += 1
-                lr /= 2
-                lr_halfed_count += 1
-
-                if opt_mode == 'adam':
-                    optimizer = torch.optim.Adam(trainable, lr=lr, weight_decay=wd)
-                elif opt_mode == 'sgd':
-                    optimizer = torch.optim.SGD(trainable, lr=lr, **opt_params)
-                new_best_ago -= 5
-            prev_loss.append(curr_loss)
 
         optimizer.zero_grad()
         loss_var.backward()
 
         torch.nn.utils.clip_grad_norm_(trainable, 0.49)  # attempt to prevent flipped edges
-        optimizer.step()
-
-        if lr_halfed_count >= max_bad:
+        scheduler.step(loss_var)
+        if optimizer.param_groups[0]['lr'] <= min_lr:
             break
+        optimizer.step()
 
     loss_bundle['pred_res'] = pred_res
     if opt_res_coarsness > 0:
@@ -139,7 +126,7 @@ def optimize_pre_post_ups(src, tgt, initial_res, sm, lr, num_iter,
     e = time.time()
 
     if verbose:
-        print ("New best: {}, No impr: {}, Iter: {}".format(new_best_count, no_impr_count, epoch))
+        print ("Iter: {}".format(epoch))
         print (loss_dict['result'].detach().cpu().numpy(), loss_dict['similarity'].detach().cpu().numpy(), loss_dict['smoothness'].detach().cpu().numpy())
         print (e - s)
         print ('==========')
