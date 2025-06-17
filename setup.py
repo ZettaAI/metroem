@@ -16,7 +16,6 @@ setuptools.setup(
     install_requires=[
         'torch',
         'torchvision',
-        'pathlib',
         'artificery',
         'torchfields',
         'h5py',
